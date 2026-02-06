@@ -18,7 +18,9 @@ const fs = require("fs");
 const TOKEN = process.env.DISCORD_TOKEN;
 const GACHA_CHANNEL_ID = "1455005226892398826";
 const RANK_CHANNEL_ID = "1455005604278964245";
+const PAST_RANK_CHANNEL_ID = "1469382279800295567";
 const COOLDOWN_MIN = 60;
+
 
 /* ========= Render用Webサーバー (ポートバインディング) ========= */
 const http = require("http");
@@ -388,28 +390,73 @@ client.on("interactionCreate", async (i) => {
     }
 
     if (i.isChatInputCommand() && i.commandName === "rank_reset") {
-      // 1位のユーザーにDMを送る
+      const r = load("./ranking.json");
+      const gachaData = load("./gacha.json");
+      const gachaName = gachaData.gacha_name || "今回のガチャ";
+
       const sortedDetails = getSortedRank();
-      if (sortedDetails.length > 0) {
-        const topUserId = sortedDetails[0][0];
+      if (sortedDetails.length === 0) return i.reply("リセット可能なランキングデータがありません。");
+
+      const topUserId = sortedDetails[0][0];
+
+      try {
+        // 1. 過去ランキングチャンネルへ投稿
+        const pastCh = await client.channels.fetch(PAST_RANK_CHANNEL_ID).catch(() => null);
+        if (pastCh) {
+          const pastEmbed = new EmbedBuilder()
+            .setTitle(`🏆 ${gachaName}：月間最終ランキング`)
+            .setColor(0x00ae86)
+            .setTimestamp();
+
+          sortedDetails.slice(0, 20).forEach((u, index) => {
+            pastEmbed.addFields({ name: `${index + 1}位 ${u[1].name}`, value: `${u[1].point}pt` });
+          });
+
+          await pastCh.send({ embeds: [pastEmbed] });
+          await pastCh.send(`🎉 **今月の一位は <@${topUserId}> さんでした。おめでとうございます！！**`);
+        }
+
+        // 2. 月間ランキングチャンネルの履歴をすべて削除
+        const rankCh = await client.channels.fetch(RANK_CHANNEL_ID).catch(() => null);
+        if (rankCh) {
+          let fetched;
+          do {
+            fetched = await rankCh.messages.fetch({ limit: 100 });
+            if (fetched.size > 0) {
+              await rankCh.bulkDelete(fetched).catch(async (e) => {
+                // 14日以上前のメッセージがある場合の個別削除
+                for (const m of fetched.values()) {
+                  await m.delete().catch(() => { });
+                }
+              });
+            }
+          } while (fetched.size > 0);
+        }
+
+        // 3. 1位のユーザーに個別にDMを送る (既存機能)
         try {
           const topUser = await client.users.fetch(topUserId);
           await topUser.send(
-            "月間ガチャptランキング一位おめでとうございます！このDMの内容をスクショし、お問い合わせ・ご要望・当選チャンネルでチケットを発行して、そこに送ってください！管理者が担当致します"
+            "月間ガチャptランキング一位おめでとうございます！このDMの内容をスクショし、当選用チケットを発行して、送ってください！管理者が担当致します"
           );
         } catch (e) {
           console.error("1位のユーザーへのDM送信に失敗しました:", e);
         }
-      }
 
-      const r = load("./ranking.json");
-      Object.keys(r).forEach((uid) => {
-        r[uid].point = 0;
-      });
-      save("./ranking.json", r);
-      await updateRankingChannel();
-      return i.reply("全員のポイントを0にリセットしました");
+        // 4. ポイントをリセット
+        Object.keys(r).forEach((uid) => {
+          r[uid].point = 0;
+        });
+        save("./ranking.json", r);
+        await updateRankingChannel();
+
+        return i.reply("ランキングを過去ログに保存し、月間ランキングをリセットしました。");
+      } catch (err) {
+        console.error("リセット処理中にエラーが発生しました:", err);
+        return i.reply({ content: "リセット処理中にエラーが発生しました。PAST_RANK_CHANNEL_IDを確認してください。", ephemeral: true });
+      }
     }
+
   } catch (error) {
     console.error("Interaction processing error:", error);
     try {
