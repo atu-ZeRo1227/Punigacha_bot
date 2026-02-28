@@ -295,6 +295,29 @@ client.on("interactionCreate", async (i) => {
       // 現在の順位を取得
       const currentRank = getUserRank(i.user.id);
 
+      // スプレッドシートへデータ送信 (GAS Webhook URLが存在する場合のみ実行)
+      if (process.env.GAS_WEBHOOK_URL) {
+        const gasUrl = process.env.GAS_WEBHOOK_URL;
+        const gachaName = load("./gacha.json").gacha_name || "ガチャ";
+        const pulledText = results.map((c) => `[${c.rank.toUpperCase()}] ${c.name}`).join(", ");
+        const userCurrentPt = (load("./ranking.json")[i.user.id] || { point: 0 }).point;
+
+        // POSTするデータ (日時、ID、ユーザー名、ガチャ名、中身、累計ポイント)
+        const postData = {
+          date: new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }),
+          user_id: i.user.id,
+          user_name: i.user.username,
+          gacha_name: gachaName,
+          contents: pulledText,
+          points: userCurrentPt
+        };
+
+        fetch(gasUrl, {
+          method: "POST",
+          body: JSON.stringify(postData)
+        }).catch(err => console.error("GASへの送信に失敗しました:", err));
+      }
+
       embed.addFields(
         { name: "━━━━━━━━━━━━━━━", value: "\u200B" }, // 区切り線
         { name: "💰 今回の獲得ポイント", value: `${total}pt`, inline: true },
