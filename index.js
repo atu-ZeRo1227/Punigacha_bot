@@ -21,7 +21,7 @@ const GACHA_CHANNEL_ID = "1455005226892398826";
 const RANK_CHANNEL_ID = "1455005604278964245";
 const PAST_RANK_CHANNEL_ID = "1469382279800295567";
 const COOLDOWN_MIN = 60;
-const GAS_WEBHOOK_URL = process.env.GAS_WEBHOOK_URL;
+const GAS_URL = process.env.GACHA_LOG_URL;
 
 
 /* ========= Render用Webサーバー (ポートバインディング) ========= */
@@ -55,11 +55,11 @@ const save = (f, d) => {
 };
 
 async function saveToSheet(type, data) {
-  const gasUrl = process.env.GAS_WEBHOOK_URL;
+  const gasUrl = process.env.GACHA_LOG_URL;
   if (!gasUrl) return;
 
   try {
-    await fetch(gasUrl, {
+    const response = await fetch(gasUrl, {
       method: "POST",
       body: JSON.stringify({
         type: type,
@@ -67,8 +67,11 @@ async function saveToSheet(type, data) {
         ...data
       })
     });
+    if (!response.ok) {
+      console.error(`GAS sync failed (HTTP ${response.status}) (${type}):`, await response.text());
+    }
   } catch (err) {
-    console.error(`GAS sync failed (${type}):`, err);
+    console.error(`GAS sync failed (Network/Other) (${type}):`, err);
   }
 }
 async function syncToGas(type, data) { await saveToSheet(type, data); } // 既存の呼び出し箇所の互換性維持
@@ -189,18 +192,23 @@ async function updateRankingChannel() {
 }
 
 async function refreshGachaData() {
-  const gasUrl = process.env.GAS_WEBHOOK_URL;
-  if (!gasUrl) return { success: false, message: "GAS_WEBHOOK_URLが設定されていません。" };
+  const gasUrl = process.env.GACHA_LOG_URL;
+  if (!gasUrl) return { success: false, message: "GACHA_LOG_URLが設定されていません。" };
 
   try {
     const response = await fetch(`${gasUrl}?type=get_gacha`);
-    if (!response.ok) throw new Error("GASからのデータ取得に失敗しました。");
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`Gacha sync failed (HTTP ${response.status}):`, errorText);
+      throw new Error(`GASからのデータ取得に失敗しました。(HTTP ${response.status})`);
+    }
 
     const data = await response.json();
     if (data && data.characters) {
       save("./gacha.json", data);
       return { success: true, message: "ガチャデータを更新しました。" };
     } else {
+      console.error("Gacha sync failed: Invalid data format", data);
       return { success: false, message: "取得したデータが不正です。" };
     }
   } catch (e) {
