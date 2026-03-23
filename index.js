@@ -20,7 +20,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const GACHA_CHANNEL_ID = "1455005226892398826";
 const RANK_CHANNEL_ID = "1455005604278964245";
 const PAST_RANK_CHANNEL_ID = "1469382279800295567";
-const COOLDOWN_MIN = 60;
+const COOLDOWN_MIN_DEFAULT = 60;
 const GAS_URL = process.env.GACHA_LOG_URL;
 
 
@@ -61,11 +61,15 @@ async function saveToSheet(type, data) {
   try {
     const response = await fetch(gasUrl, {
       method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
         type: type,
         timestamp: new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }),
         ...data
-      })
+      }),
+      redirect: "follow"
     });
     if (!response.ok) {
       console.error(`GAS sync failed (HTTP ${response.status}) (${type}):`, await response.text());
@@ -126,7 +130,9 @@ function checkCooldown(uid) {
   const cd = load("./cooldown.json");
   if (!cd[uid]) return 0;
   const diff = Date.now() - cd[uid];
-  const remain = COOLDOWN_MIN * 60000 - diff;
+  const gachaData = load("./gacha.json");
+  const cooldownMin = Number(gachaData.cooldown_min) || COOLDOWN_MIN_DEFAULT;
+  const remain = cooldownMin * 60000 - diff;
   return remain > 0 ? remain : 0;
 }
 function setCooldown(uid) {
@@ -138,7 +144,8 @@ function setCooldown(uid) {
 /* ========= ランキング ========= */
 function addPoint(user, pt) {
   const r = load("./ranking.json");
-  if (!r[user.id]) r[user.id] = { name: user.username, point: 0 };
+  if (!r[user.id]) r[user.id] = { point: 0 };
+  r[user.id].name = user.username; // 名前が変更されている可能性があるので常に更新
   r[user.id].point += pt;
   save("./ranking.json", r);
   syncToGas("point_update", {
@@ -147,6 +154,8 @@ function addPoint(user, pt) {
     added_point: pt,
     total_point: r[user.id].point
   });
+  // ランキングチャンネルを自動更新
+  updateRankingChannel().catch(e => console.error("Ranking update failed:", e));
 }
 function getSortedRank() {
   const r = load("./ranking.json");
@@ -171,20 +180,13 @@ async function updateRankingChannel() {
       embed.addFields({ name: `${i + 1}位 ${u[1].name}`, value: `${u[1].point}pt` }),
     );
 
-    // チャンネル内の全メッセージを削除（常に最新のランキングのみを表示するため）
-    let fetched;
-    do {
-      fetched = await ch.messages.fetch({ limit: 100 });
-      if (fetched.size > 0) {
-        await ch.bulkDelete(fetched).catch(async (e) => {
-          // 14日以上前のメッセージが含まれる場合の個別削除
-          for (const m of fetched.values()) {
-            await m.delete().catch(() => { });
-          }
-        });
-      }
-    } while (fetched.size > 0);
+    // ボットの投稿した既存のランキングメッセージを探して削除（自身のメッセージなので管理権限不要）
+    const messages = await ch.messages.fetch({ limit: 50 });
+    const botMsg = messages.find(m => m.author.id === client.user.id && m.embeds[0]?.title === "🏆 ガチャランキング TOP20");
 
+    if (botMsg) {
+      await botMsg.delete().catch(() => {});
+    }
     await ch.send({ embeds: [embed] });
   } catch (e) {
     console.error("ランキング更新中にエラーが発生しました:", e);
@@ -203,7 +205,15 @@ async function refreshGachaData() {
       throw new Error(`GASからのデータ取得に失敗しました。(HTTP ${response.status})`);
     }
 
-    const data = await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch (parseErr) {
+      const respText = await response.text().catch(() => "Could not read response text");
+      console.error("Gacha sync: Response is not valid JSON.", { status: response.status, bodyPreview: respText.slice(0, 500) });
+      return { success: false, message: "GASからのデータがJSON形式ではありません。URLやアクセス権限を確認してください。" };
+    }
+
     if (data && data.characters) {
       save("./gacha.json", data);
       return { success: true, message: "ガチャデータを更新しました。" };
@@ -246,6 +256,13 @@ client.once("ready", async () => {
     new SlashCommandBuilder()
       .setName("gacha_sync")
       .setDescription("スプレッドシートからガチャデータを同期する")
+      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder()
+      .setName("gacha_cooldown")
+      .setDescription("ガチャのクールタイム(分)を設定する")
+      .addIntegerOption((o) =>
+        o.setName("minutes").setDescription("分単位で指定").setRequired(true),
+      )
       .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   ];
   await client.application.commands.set(commands);
@@ -330,7 +347,6 @@ client.on("interactionCreate", async (i) => {
         return i.reply({ content: "クールタイム中です。DMを確認してください。", ephemeral: true });
       }
 
-      const before = getSortedRank().slice(0, 20);
       const results = draw10();
 
       // ガチャデータが空の場合のハンドリング
@@ -389,8 +405,6 @@ client.on("interactionCreate", async (i) => {
         await i.reply({ content: "DMの送信に失敗しました。設定を確認してください。", ephemeral: true });
       }
 
-      const after = getSortedRank().slice(0, 20);
-      if (JSON.stringify(before) !== JSON.stringify(after)) await updateRankingChannel();
     }
 
     /* --- 管理者Modal --- */
@@ -487,7 +501,6 @@ client.on("interactionCreate", async (i) => {
     if (i.isChatInputCommand() && i.commandName === "rank_user") {
       await i.deferReply({ ephemeral: true });
       addPoint(i.options.getUser("user"), i.options.getInteger("point"));
-      await updateRankingChannel();
       return i.editReply("操作完了");
     }
 
@@ -551,6 +564,15 @@ client.on("interactionCreate", async (i) => {
       await i.deferReply({ ephemeral: true });
       const result = await refreshGachaData();
       return i.editReply(result.message);
+    }
+
+    /* --- クールタイム設定 --- */
+    if (i.isChatInputCommand() && i.commandName === "gacha_cooldown") {
+      const min = i.options.getInteger("minutes");
+      const d = load("./gacha.json");
+      d.cooldown_min = min;
+      save("./gacha.json", d);
+      return i.reply({ content: `ガチャのクールタイムを ${min}分 に設定しました。`, ephemeral: true });
     }
 
   } catch (error) {

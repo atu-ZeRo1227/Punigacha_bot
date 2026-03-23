@@ -1,3 +1,13 @@
 {
-  "gacha_name": "test"
+  "gacha_name": "test",
+  "characters": [
+    {
+      "id": "000",
+      "rank": "s",
+      "name": "おはごるキャリーチケット",
+      "image": "https://writening.net/page?VBFVEs",
+      "rate": 0.1
+    }
+  ],
+  "cooldown_min": 1
 }
