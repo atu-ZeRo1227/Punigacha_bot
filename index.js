@@ -13,7 +13,7 @@ const {
   PermissionFlagsBits,
   ChannelType,
 } = require("discord.js");
-const fs = require("fs");
+const axios = require("axios");
 
 /* ========= 設定 ========= */
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -22,9 +22,9 @@ const RANK_CHANNEL_ID = "1455005604278964245";
 const PAST_RANK_CHANNEL_ID = "1469382279800295567";
 const COOLDOWN_MIN_DEFAULT = 60;
 const GAS_URL = process.env.GACHA_LOG_URL;
+const API_KEY = process.env.API_KEY || "my_secret_key"; // Code.gsのAPI_KEYと一致させる
 
-
-/* ========= Render用Webサーバー (ポートバインディング) ========= */
+/* ========= Render用Webサーバー ========= */
 const http = require("http");
 http.createServer((req, res) => {
   res.writeHead(200);
@@ -36,73 +36,50 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
-/* ========= 共通 ========= */
-const load = (f) => {
-  try {
-    if (!fs.existsSync(f)) return {};
-    return JSON.parse(fs.readFileSync(f, "utf8"));
-  } catch (e) {
-    console.error(`Error loading ${f}:`, e);
-    return {};
-  }
-};
-const save = (f, d) => {
-  try {
-    fs.writeFileSync(f, JSON.stringify(d, null, 2));
-  } catch (e) {
-    console.error(`Error saving ${f}:`, e);
-  }
+/* ========= 共通（Spreadsheet API経由） ========= */
+let cache = {
+  config: {},
+  characters: [],
+  ranking: {},
+  cooldowns: {}
 };
 
-async function saveToSheet(type, data) {
-  const gasUrl = process.env.GACHA_LOG_URL;
-  if (!gasUrl) return;
-
+// GASから全データを取得して同期
+async function syncFromGas() {
+  if (!GAS_URL) return;
   try {
-    const response = await fetch(gasUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        type: type,
-        timestamp: new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }),
-        ...data
-      }),
-      redirect: "follow"
-    });
-    if (!response.ok) {
-      console.error(`GAS sync failed (HTTP ${response.status}) (${type}):`, await response.text());
+    const res = await axios.post(GAS_URL, { action: "get_all", key: API_KEY });
+    if (res.data) {
+      cache.config = res.data.config || {};
+      cache.characters = res.data.characters || [];
+      cache.ranking = res.data.ranking || {};
+      cache.cooldowns = res.data.cooldowns || {};
+      console.log("Synced all data from Spreadsheet");
     }
   } catch (err) {
-    console.error(`GAS sync failed (Network/Other) (${type}):`, err);
+    console.error("Failed to sync from GAS:", err.message);
   }
 }
-async function syncToGas(type, data) { await saveToSheet(type, data); } // 既存の呼び出し箇所の互換性維持
+
+async function saveToGas(action, data) {
+  if (!GAS_URL) return;
+  try {
+    await axios.post(GAS_URL, { action, key: API_KEY, data });
+  } catch (err) {
+    console.error(`Failed to save to GAS (${action}):`, err.message);
+  }
+}
 
 const RANK_POINT = {
-  "uz+": 10,
-  uz: 8,
-  zzz: 6,
-  zz: 4,
-  z: 2,
-  sss: 1,
-  ss: 1,
-  s: 1,
-  a: 1,
-  b: 1,
-  c: 1,
-  d: 1,
-  e: 1,
+  "uz+": 10, uz: 8, zzz: 6, zz: 4, z: 2, 
+  sss: 1, ss: 1, s: 1, a: 1, b: 1, c: 1, d: 1, e: 1,
 };
 
 /* ========= ガチャ ========= */
 function draw10() {
-  const data = load("./gacha.json");
-  const chars = data.characters || [];
+  const chars = cache.characters;
   if (chars.length === 0) return [];
 
-  // 全キャラクターのレート合計を計算（これが100なら「設定値＝％」になる）
   const totalWeight = chars.reduce((acc, c) => acc + (Number(c.rate) || 0), 0);
   if (totalWeight <= 0) return [];
 
@@ -119,7 +96,6 @@ function draw10() {
       }
       r -= rate;
     }
-    // 念のためのフォールバック
     if (!picked && chars.length > 0) results.push(chars[chars.length - 1]);
   }
   return results;
@@ -127,468 +103,272 @@ function draw10() {
 
 /* ========= クールタイム ========= */
 function checkCooldown(uid) {
-  const cd = load("./cooldown.json");
-  if (!cd[uid]) return 0;
-  const diff = Date.now() - cd[uid];
-  const gachaData = load("./gacha.json");
-  const cooldownMin = Number(gachaData.cooldown_min) || COOLDOWN_MIN_DEFAULT;
+  if (!cache.cooldowns[uid]) return 0;
+  const diff = Date.now() - cache.cooldowns[uid];
+  const cooldownMin = Number(cache.config.cooldown_min) || COOLDOWN_MIN_DEFAULT;
   const remain = cooldownMin * 60000 - diff;
   return remain > 0 ? remain : 0;
 }
-function setCooldown(uid) {
-  const cd = load("./cooldown.json");
-  cd[uid] = Date.now();
-  save("./cooldown.json", cd);
+
+async function setCooldown(uid) {
+  cache.cooldowns[uid] = Date.now();
+  await saveToGas("save_cooldown", cache.cooldowns);
 }
 
 /* ========= ランキング ========= */
-function addPoint(user, pt) {
-  const r = load("./ranking.json");
-  if (!r[user.id]) r[user.id] = { point: 0 };
-  r[user.id].name = user.username; // 名前が変更されている可能性があるので常に更新
-  r[user.id].point += pt;
-  save("./ranking.json", r);
-  syncToGas("point_update", {
-    user_id: user.id,
-    user_name: user.username,
-    added_point: pt,
-    total_point: r[user.id].point
-  });
-  // ランキングチャンネルを自動更新
-  updateRankingChannel().catch(e => console.error("Ranking update failed:", e));
+async function addPoint(user, pt) {
+  if (!cache.ranking[user.id]) cache.ranking[user.id] = { point: 0 };
+  cache.ranking[user.id].name = user.username;
+  cache.ranking[user.id].point += pt;
+  
+  await saveToGas("save_ranking", cache.ranking);
+  await updateRankingChannel(); // ランキングチャンネルを更新
 }
-function getSortedRank() {
-  const r = load("./ranking.json");
-  return Object.entries(r).sort((a, b) => b[1].point - a[1].point);
-}
-function getUserRank(uid) {
-  return getSortedRank().findIndex((v) => v[0] === uid) + 1;
-}
+
 async function updateRankingChannel() {
+  if (!RANK_CHANNEL_ID) return;
   try {
-    const ch = await client.channels.fetch(RANK_CHANNEL_ID);
-    if (!ch || !ch.messages) return;
+    const channel = await client.channels.fetch(RANK_CHANNEL_ID);
+    if (!channel) return;
 
-    const top20 = getSortedRank().slice(0, 20);
-
+    const sorted = getSortedRank().slice(0, 20);
     const embed = new EmbedBuilder()
       .setTitle("🏆 ガチャランキング TOP20")
       .setColor(0xffd700)
       .setTimestamp();
+    
+    sorted.forEach((u, i) => {
+      embed.addFields({ name: `${i + 1}位 ${u[1].name}`, value: `${u[1].point}pt` });
+    });
 
-    top20.forEach((u, i) =>
-      embed.addFields({ name: `${i + 1}位 ${u[1].name}`, value: `${u[1].point}pt` }),
-    );
+    // 既存のランキングメッセージを探して削除
+    const messages = await channel.messages.fetch({ limit: 50 });
+    const oldMsg = messages.find(m => m.author.id === client.user.id && m.embeds[0]?.title === "🏆 ガチャランキング TOP20");
+    if (oldMsg) await oldMsg.delete().catch(() => {});
 
-    // ボットの投稿した既存のランキングメッセージを探して削除（自身のメッセージなので管理権限不要）
-    const messages = await ch.messages.fetch({ limit: 50 });
-    const botMsg = messages.find(m => m.author.id === client.user.id && m.embeds[0]?.title === "🏆 ガチャランキング TOP20");
-
-    if (botMsg) {
-      await botMsg.delete().catch(() => {});
-    }
-    await ch.send({ embeds: [embed] });
-  } catch (e) {
-    console.error("ランキング更新中にエラーが発生しました:", e);
+    await channel.send({ embeds: [embed] });
+  } catch (err) {
+    console.error("Failed to update ranking channel:", err.message);
   }
 }
 
-async function refreshGachaData() {
-  const gasUrl = process.env.GACHA_LOG_URL;
-  if (!gasUrl) return { success: false, message: "GACHA_LOG_URLが設定されていません。" };
+function getSortedRank() {
+  return Object.entries(cache.ranking).sort((a, b) => b[1].point - a[1].point);
+}
 
-  try {
-    const response = await fetch(`${gasUrl}?type=get_gacha`);
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`Gacha sync failed (HTTP ${response.status}):`, errorText);
-      throw new Error(`GASからのデータ取得に失敗しました。(HTTP ${response.status})`);
-    }
-
-    let data;
-    try {
-      data = await response.json();
-    } catch (parseErr) {
-      const respText = await response.text().catch(() => "Could not read response text");
-      console.error("Gacha sync: Response is not valid JSON.", { status: response.status, bodyPreview: respText.slice(0, 500) });
-      return { success: false, message: "GASからのデータがJSON形式ではありません。URLやアクセス権限を確認してください。" };
-    }
-
-    if (data && data.characters) {
-      save("./gacha.json", data);
-      return { success: true, message: "ガチャデータを更新しました。" };
-    } else {
-      console.error("Gacha sync failed: Invalid data format", data);
-      return { success: false, message: "取得したデータが不正です。" };
-    }
-  } catch (e) {
-    console.error("Gacha sync error:", e);
-    return { success: false, message: `エラー: ${e.message}` };
-  }
+function getUserRank(uid) {
+  return getSortedRank().findIndex((v) => v[0] === uid) + 1;
 }
 
 /* ========= 起動時 ========= */
 client.once("ready", async () => {
+  await syncFromGas(); // 初回同期
   const commands = [
-    new SlashCommandBuilder()
-      .setName("gacha")
-      .setDescription("ガチャパネルを設置する")
-      .addChannelOption((o) =>
-        o.setName("channel").setDescription("設置先のチャンネル").addChannelTypes(ChannelType.GuildText).setRequired(true),
-      )
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder()
-      .setName("admin_gacha")
-      .setDescription("管理者ガチャパネル")
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder()
-      .setName("rank_user")
-      .setDescription("特定ユーザーpt操作")
-      .addUserOption((o) => o.setName("user").setDescription("対象のユーザー").setRequired(true))
-      .addIntegerOption((o) =>
-        o.setName("point").setDescription("追加・削除するポイント").setRequired(true),
-      )
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder()
-      .setName("rank_reset")
-      .setDescription("全員のポイントを0にリセット")
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder()
-      .setName("gacha_sync")
-      .setDescription("スプレッドシートからガチャデータを同期する")
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder()
-      .setName("gacha_cooldown")
-      .setDescription("ガチャのクールタイム(分)を設定する")
-      .addIntegerOption((o) =>
-        o.setName("minutes").setDescription("分単位で指定").setRequired(true),
-      )
-      .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder().setName("gacha").setDescription("ガチャパネルを設置").addChannelOption(o => o.setName("channel").setDescription("設置先のチャンネル").addChannelTypes(ChannelType.GuildText).setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder().setName("admin_gacha").setDescription("管理者パネル").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder().setName("rank_user").setDescription("pt操作").addUserOption(o => o.setName("user").setDescription("対象ユーザー").setRequired(true)).addIntegerOption(o => o.setName("point").setDescription("追加・削除するpt").setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder().setName("rank_reset").setDescription("ランキングリセット").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder().setName("gacha_sync").setDescription("スプレッドシートから再読み込み").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder().setName("cooldown_reset").setDescription("全ユーザーのクールタイムをリセット").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    new SlashCommandBuilder().setName("gacha_cooldown").setDescription("ガチャのクールタイム(分)を設定").addIntegerOption(o => o.setName("minutes").setDescription("分").setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
   ];
   await client.application.commands.set(commands);
   console.log(`起動完了: ${client.user.tag}`);
-  console.log(`所属サーバー数: ${client.guilds.cache.size}`);
 });
 
 /* ========= Interaction ========= */
 client.on("interactionCreate", async (i) => {
   try {
-
-    /* --- ガチャパネル --- */
+    /* --- パネル設置 --- */
     if (i.isChatInputCommand() && i.commandName === "gacha") {
       const channel = i.options.getChannel("channel");
-
-      const gachaData = load("./gacha.json");
-      const title = gachaData.gacha_name ? `🎰 ${gachaData.gacha_name}` : "🎰 ガチャパネル";
-
-      const embed = new EmbedBuilder()
-        .setTitle(title)
-        .setDescription("下のボタンを押して10連ガチャを引こう！")
-        .setColor(0x00ae86)
-        .setImage(gachaData.gacha_image || null); // 画像が設定されていれば表示
-
-      try {
-        await channel.send({
-          embeds: [embed],
-          components: [
-            new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setCustomId("gacha10")
-                .setLabel("10連ガチャ")
-                .setStyle(ButtonStyle.Primary),
-            ),
-          ],
-        });
-        return i.reply({ content: `${channel} にガチャパネルを設置しました。`, ephemeral: true });
-      } catch (e) {
-        console.error(e);
-        return i.reply({ content: "チャンネルにメッセージを送信できませんでした。権限を確認してください。", ephemeral: true });
-      }
+      const title = cache.config.gacha_name ? `🎰 ${cache.config.gacha_name}` : "🎰 ガチャパネル";
+      const embed = new EmbedBuilder().setTitle(title).setDescription("下のボタンを押して10連ガチャを引こう！").setColor(0x00ae86).setImage(cache.config.gacha_image || null);
+      await channel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("gacha10").setLabel("10連ガチャ").setStyle(ButtonStyle.Primary))] });
+      return i.reply({ content: "設置しました。", ephemeral: true });
     }
 
-    /* --- 管理者ガチャパネル --- */
+    /* --- クールタイム操作 --- */
+    if (i.isChatInputCommand() && i.commandName === "gacha_cooldown") {
+      await i.deferReply({ ephemeral: true });
+      const min = i.options.getInteger("minutes");
+      cache.config.cooldown_min = min;
+      await saveToGas("save_config", { cooldown_min: min });
+      return i.editReply(`ガチャのクールタイムを ${min}分 に設定しました。`);
+    }
+
+    if (i.isChatInputCommand() && i.commandName === "cooldown_reset") {
+      await i.deferReply({ ephemeral: true });
+      cache.cooldowns = {};
+      await saveToGas("save_cooldown", {});
+      return i.editReply("全ユーザーのクールタイムをリセットしました。");
+    }
+
     if (i.isChatInputCommand() && i.commandName === "admin_gacha") {
       return i.reply({
-        content: "⚙ 管理者ガチャパネル",
-        ephemeral: true,
-        components: [
-          new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setCustomId("admin_name")
-              .setLabel("ガチャ名前変更")
-              .setStyle(ButtonStyle.Primary),
-            new ButtonBuilder()
-              .setCustomId("admin_list")
-              .setLabel("中身一覧")
-              .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-              .setCustomId("admin_add")
-              .setLabel("キャラ追加")
-              .setStyle(ButtonStyle.Success),
-            new ButtonBuilder()
-              .setCustomId("admin_remove")
-              .setLabel("キャラ削除")
-              .setStyle(ButtonStyle.Danger),
-          ),
-        ],
+        content: "⚙ 管理者パネル", ephemeral: true,
+        components: [new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("admin_name").setLabel("名前変更").setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId("admin_list").setLabel("キャラ一覧").setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId("admin_add").setLabel("キャラ追加").setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId("admin_remove").setLabel("キャラ削除").setStyle(ButtonStyle.Danger),
+        )]
       });
     }
 
-    /* --- ガチャ実行 --- */
     if (i.isButton() && i.customId === "gacha10") {
+      await i.deferReply({ ephemeral: true });
       const remain = checkCooldown(i.user.id);
-      if (remain > 0) {
-        const min = Math.ceil(remain / 60000);
-        try {
-          await i.user.send(`⏳ あと ${min}分で引けます`);
-        } catch (e) {
-          // DMが送れない場合などは無視
-        }
-        return i.reply({ content: "クールタイム中です。DMを確認してください。", ephemeral: true });
-      }
+      if (remain > 0) return i.editReply({ content: `⏳ あと ${Math.ceil(remain / 60000)}分です。` });
 
       const results = draw10();
+      if (results.length < 10) return i.editReply({ content: "データなし" });
 
-      // ガチャデータが空の場合のハンドリング
-      if (results.length < 10) {
-        return i.reply({ content: "ガチャデータが正しく設定されていません。(キャラクターが登録されていないか、確率が0です)", ephemeral: true });
-      }
-
-      setCooldown(i.user.id);
-
+      await setCooldown(i.user.id);
       let total = 0;
-      const embed = new EmbedBuilder()
-        .setTitle("🎰 10連ガチャ結果")
-        .setColor(0xffd700) // ゴールド色
-        .setTimestamp();
-
+      const embed = new EmbedBuilder().setTitle("🎰 ガチャ結果").setColor(0xffd700).setTimestamp();
       results.forEach((c, index) => {
         const pt = RANK_POINT[c.rank.toLowerCase()] || 0;
         total += pt;
-        const rankUpper = c.rank.toUpperCase();
-        embed.addFields({
-          name: `${index + 1}. [${rankUpper}] ${c.name}`,
-          value: `獲得pt: ${pt}pt\n[キャラクター画像](${c.image})`,
-          inline: false
-        });
+        embed.addFields({ name: `${index + 1}. [${c.rank.toUpperCase()}] ${c.name}`, value: `獲得pt: ${pt}pt\n[画像](${c.image})` });
       });
 
-      addPoint(i.user, total);
-
-      // 現在の順位を取得
+      await addPoint(i.user, total);
       const currentRank = getUserRank(i.user.id);
-
-      // スプレッドシートへデータ送信
-      const gachaName = load("./gacha.json").gacha_name || "ガチャ";
-      const pulledText = results.map((c) => `[${c.rank.toUpperCase()}] ${c.name}`).join(", ");
-      const userCurrentPt = (load("./ranking.json")[i.user.id] || { point: 0 }).point;
-
-      await saveToSheet("gacha_draw", {
-        user_id: i.user.id,
-        user_name: i.user.username,
-        gacha_name: gachaName,
-        contents: pulledText,
-        points: userCurrentPt
-      });
-
-      embed.addFields(
-        { name: "━━━━━━━━━━━━━━━", value: "\u200B" }, // 区切り線
-        { name: "💰 今回の獲得ポイント", value: `${total}pt`, inline: true },
-        { name: "👑 現在の順位", value: `${currentRank}位`, inline: true },
-      );
+      embed.addFields({ name: "━━━━━━━━━━━━━━━", value: `💰 獲得: ${total}pt | 👑 順位: ${currentRank}位` });
 
       try {
         await i.user.send({ embeds: [embed] });
-        await i.reply({ content: "結果をDMで送信しました。", ephemeral: true });
+        await i.editReply({ content: "結果をDMに送信しました。" });
       } catch (e) {
-        console.error(e);
-        await i.reply({ content: "DMの送信に失敗しました。設定を確認してください。", ephemeral: true });
+        await i.editReply({ content: "DM送信失敗。設定を確認してください。" });
       }
-
     }
 
-    /* --- 管理者Modal --- */
+    /* --- 管理者モーダル表示 --- */
     if (i.isButton() && i.customId === "admin_name") {
       const modal = new ModalBuilder().setCustomId("m_name").setTitle("ガチャ名前変更");
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId("name")
-            .setLabel("新ガチャ名")
-            .setStyle(TextInputStyle.Short),
-        ),
-      );
+      modal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder().setCustomId("name").setLabel("新ガチャ名").setStyle(TextInputStyle.Short)
+      ));
       return i.showModal(modal);
     }
 
-    if (i.isModalSubmit() && i.customId === "m_name") {
-      const d = load("./gacha.json");
-      d.gacha_name = i.fields.getTextInputValue("name");
-      save("./gacha.json", d);
-      syncToGas("gacha_name_update", { gacha_name: d.gacha_name });
-      return i.reply({ content: "変更しました", ephemeral: true });
-    }
-
     if (i.isButton() && i.customId === "admin_add") {
-      const m = new ModalBuilder().setCustomId("m_add").setTitle("キャラ追加");
-      ["id", "rank", "name", "image", "rate"].forEach((v) =>
-        m.addComponents(
-          new ActionRowBuilder().addComponents(
-            new TextInputBuilder().setCustomId(v).setLabel(v).setStyle(TextInputStyle.Short),
-          ),
-        ),
-      );
-      return i.showModal(m);
-    }
-
-    if (i.isModalSubmit() && i.customId === "m_add") {
-      const d = load("./gacha.json");
-      if (!d.characters) d.characters = [];
-      if (d.characters.some((c) => c.id === i.fields.getTextInputValue("id")))
-        return i.reply({ content: "ID重複", ephemeral: true });
-
-
-      const newChar = {
-        id: i.fields.getTextInputValue("id"),
-        rank: i.fields.getTextInputValue("rank"),
-        name: i.fields.getTextInputValue("name"),
-        image: i.fields.getTextInputValue("image"),
-        rate: Number(i.fields.getTextInputValue("rate")),
-      };
-      d.characters.push(newChar);
-      save("./gacha.json", d);
-      syncToGas("character_add", newChar);
-      return i.reply({ content: "追加しました", ephemeral: true });
+       const m = new ModalBuilder().setCustomId("m_add").setTitle("キャラ追加");
+       ["id", "rank", "name", "image", "rate"].forEach(v => m.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(v).setLabel(v).setStyle(TextInputStyle.Short))));
+       return i.showModal(m);
     }
 
     if (i.isButton() && i.customId === "admin_remove") {
       const m = new ModalBuilder().setCustomId("m_remove").setTitle("キャラ削除");
-      m.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder().setCustomId("id").setLabel("ID").setStyle(TextInputStyle.Short),
-        ),
-      );
+      m.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId("id").setLabel("ID").setStyle(TextInputStyle.Short)));
       return i.showModal(m);
     }
 
-    if (i.isModalSubmit() && i.customId === "m_remove") {
-      const d = load("./gacha.json");
-      if (!d.characters) d.characters = [];
-      const before = d.characters.length;
-      const removeId = i.fields.getTextInputValue("id");
-      d.characters = d.characters.filter((c) => c.id !== removeId);
-      if (before === d.characters.length)
-        return i.reply({ content: "見つかりません", ephemeral: true });
-      save("./gacha.json", d);
-      syncToGas("character_remove", { id: removeId });
-      return i.reply({ content: "削除しました", ephemeral: true });
-    }
-
-
     if (i.isButton() && i.customId === "admin_list") {
-      const d = load("./gacha.json");
-      const chars = d.characters || [];
-      const total = chars.reduce((acc, c) => acc + (Number(c.rate) || 0), 0);
-      const list = chars.map((c) => `[${c.id}] ${c.rank} ${c.name} (確率重み: ${c.rate})`).join("\n");
-      return i.reply({
-        content: `📦 **キャラ一覧** (合計レート: ${total})\n※合計が100の時、レートがそのまま％になります\n\n${list || "未登録"}`,
-        ephemeral: true,
-      });
+      const list = cache.characters.map((c) => `[${c.id}] ${c.rank} ${c.name} (レート: ${c.rate})`).join("\n");
+      return i.reply({ content: `📦 **キャラ一覧**\n\n${list || "未登録"}`, ephemeral: true });
     }
 
+    // Modal Submit
+    if (i.isModalSubmit() && i.customId === "m_name") {
+      await i.deferReply({ ephemeral: true });
+      const newName = i.fields.getTextInputValue("name");
+      cache.config.gacha_name = newName;
+      await saveToGas("save_config", { gacha_name: newName });
+      return i.editReply({ content: "変更完了" });
+    }
 
-    /* --- ランキング操作 --- */
+    if (i.isModalSubmit() && i.customId === "m_add") {
+      await i.deferReply({ ephemeral: true });
+      const newChar = { id: i.fields.getTextInputValue("id"), rank: i.fields.getTextInputValue("rank"), name: i.fields.getTextInputValue("name"), image: i.fields.getTextInputValue("image"), rate: Number(i.fields.getTextInputValue("rate")) };
+      cache.characters.push(newChar);
+      await saveToGas("save_config", { characters: cache.characters });
+      await syncFromGas(); // 最新データを再取得してキャッシュ更新
+      return i.editReply({ content: "追加しました" });
+    }
+
+    if (i.isModalSubmit() && i.customId === "m_remove") {
+      await i.deferReply({ ephemeral: true });
+      const id = i.fields.getTextInputValue("id");
+      cache.characters = cache.characters.filter(c => c.id !== id);
+      await saveToGas("save_config", { characters: cache.characters });
+      await syncFromGas();
+      return i.editReply({ content: "削除しました" });
+    }
+
+    if (i.isChatInputCommand() && i.commandName === "gacha_sync") {
+      await i.deferReply({ ephemeral: true });
+      await syncFromGas();
+      return i.editReply("同期完了しました。");
+    }
+
     if (i.isChatInputCommand() && i.commandName === "rank_user") {
       await i.deferReply({ ephemeral: true });
-      addPoint(i.options.getUser("user"), i.options.getInteger("point"));
+      await addPoint(i.options.getUser("user"), i.options.getInteger("point"));
       return i.editReply("操作完了");
     }
 
     if (i.isChatInputCommand() && i.commandName === "rank_reset") {
-      const r = load("./ranking.json");
-      const gachaData = load("./gacha.json");
-      const gachaName = gachaData.gacha_name || "今回のガチャ";
-
-      const sortedDetails = getSortedRank();
-      if (sortedDetails.length === 0) return i.reply("リセット可能なランキングデータがありません。");
-
-      const topUserId = sortedDetails[0][0];
-
-      try {
-        await i.deferReply();
-        // 1. 過去ランキングチャンネルへ投稿
-        const pastCh = await client.channels.fetch(PAST_RANK_CHANNEL_ID).catch(() => null);
-        if (pastCh) {
-          const pastEmbed = new EmbedBuilder()
-            .setTitle(`🏆 ${gachaName}：月間最終ランキング`)
-            .setColor(0x00ae86)
-            .setTimestamp();
-
-          sortedDetails.slice(0, 20).forEach((u, index) => {
-            pastEmbed.addFields({ name: `${index + 1}位 ${u[1].name}`, value: `${u[1].point}pt` });
-          });
-
-          await pastCh.send({ embeds: [pastEmbed] });
-          await pastCh.send(`🎉 **今月の一位は <@${topUserId}> さんでした。おめでとうございます！！**`);
-        }
-
-        // 2. 1位のユーザーに個別にDMを送る
-        try {
-          const topUser = await client.users.fetch(topUserId);
-          await topUser.send(
-            "月間ガチャptランキング一位おめでとうございます！このDMの内容をスクショし、当選用チケットを発行して、送ってください！管理者が担当致します"
-          );
-        } catch (e) {
-          console.error("1位のユーザーへのDM送信に失敗しました:", e);
-        }
-
-        // 3. ポイントをリセット
-        Object.keys(r).forEach((uid) => {
-          r[uid].point = 0;
-        });
-        save("./ranking.json", r);
-        await updateRankingChannel();
-
-        return i.editReply("ランキングを過去ログに保存し、月間ランキングをリセットしました。");
-      } catch (err) {
-        console.error("リセット処理中にエラーが発生しました:", err);
-        if (i.deferred || i.replied) {
-          return i.editReply({ content: "リセット処理中にエラーが発生しました。PAST_RANK_CHANNEL_IDを確認してください。" });
-        }
-        return i.reply({ content: "リセット処理中にエラーが発生しました。PAST_RANK_CHANNEL_IDを確認してください。", ephemeral: true });
-      }
-    }
-
-    /* --- ガチャ同期 --- */
-    if (i.isChatInputCommand() && i.commandName === "gacha_sync") {
-      await i.deferReply({ ephemeral: true });
-      const result = await refreshGachaData();
-      return i.editReply(result.message);
-    }
-
-    /* --- クールタイム設定 --- */
-    if (i.isChatInputCommand() && i.commandName === "gacha_cooldown") {
-      const min = i.options.getInteger("minutes");
-      const d = load("./gacha.json");
-      d.cooldown_min = min;
-      save("./gacha.json", d);
-      return i.reply({ content: `ガチャのクールタイムを ${min}分 に設定しました。`, ephemeral: true });
+      await i.deferReply();
+      const res = await rankReset();
+      return i.editReply(res);
     }
 
   } catch (error) {
-    console.error("Interaction processing error:", error);
-    try {
-      if (i.deferred || i.replied) {
-        await i.followUp({ content: "エラーが発生しました。", ephemeral: true });
-      } else {
-        await i.reply({ content: "エラーが発生しました。", ephemeral: true });
-      }
-    } catch (err) {
-      console.error("Failed to send error reply:", err);
-    }
+    console.error(error);
   }
 });
 
+/* ========= ランキングリセット処理 ========= */
+async function rankReset() {
+  const sorted = getSortedRank();
+  if (sorted.length === 0) return "リセットするデータがありません。";
 
+  const topUserId = sorted[0][0];
+  const gachaName = cache.config.gacha_name || "今回のガチャ";
+
+  try {
+    // 1. 過去ランキングチャンネルへ投稿
+    const pastCh = await client.channels.fetch(PAST_RANK_CHANNEL_ID).catch(() => null);
+    if (pastCh) {
+      const pastEmbed = new EmbedBuilder()
+        .setTitle(`🏆 ${gachaName}：月間最終ランキング結果`)
+        .setColor(0x00ae86)
+        .setTimestamp();
+      
+      sorted.slice(0, 20).forEach((u, index) => {
+        pastEmbed.addFields({ name: `${index + 1}位 ${u[1].name}`, value: `${u[1].point}pt` });
+      });
+
+      await pastCh.send({ embeds: [pastEmbed] });
+      await pastCh.send(`🎉 **今月の第1位は <@${topUserId}> さんでした！おめでとうございます！**`);
+    }
+
+    // 2. 1位のユーザーに個別にDMを送る
+    try {
+      const topUser = await client.users.fetch(topUserId);
+      await topUser.send(
+        "✨ 月間ガチャptランキング1位、本当におめでとうございます！\nこのDMの内容をスクショし、「当選用チケット」を発行して管理者に送ってください！担当者が対応いたします。"
+      );
+    } catch (e) {
+      console.error("1位へのDM送信に失敗:", e.message);
+    }
+
+    // 3. 全員のポイントリセットと保存
+    Object.keys(cache.ranking).forEach((uid) => {
+      cache.ranking[uid].point = 0;
+    });
+
+    await saveToGas("save_ranking", cache.ranking);
+    await updateRankingChannel(); // 表示もリセット
+
+    return "ランキングを過去ログに保存し、全員のポイントをリセットしました。";
+  } catch (err) {
+    console.error("Reset error:", err);
+    return "リセット中にエラーが発生しました。PAST_RANK_CHANNEL_ID等を確認してください。";
+  }
+}
 
 client.login(TOKEN);
