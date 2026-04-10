@@ -24,14 +24,7 @@ const COOLDOWN_MIN_DEFAULT = 60;
 const GAS_URL = process.env.GACHA_LOG_URL;
 const API_KEY = process.env.API_KEY || "my_secret_key"; // Code.gsのAPI_KEYと一致させる
 
-/* ========= Render用Webサーバー ========= */
-const http = require("http");
-http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("OK");
-}).listen(process.env.PORT || 10000, () => {
-  console.log(`ダミーサーバー起動: ポート ${process.env.PORT || 10000} で待機中...`);
-});
+
 
 /* ========= Client ========= */
 const client = new Client({
@@ -373,4 +366,15 @@ async function rankReset() {
   }
 }
 
+/* ========= サーバー起動 & Bot起動 (並行処理) ========= */
+// 1. Renderのスリープ対策：Botとは独立してHTTPサーバーを立ち上げる
+const http = require("http");
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("OK");
+}).listen(process.env.PORT || 10000, () => {
+  console.log(`Render維持用HTTPサーバー起動: ポート ${process.env.PORT || 10000} で待機中...`);
+});
+
+// 2. Discord Botの起動 (サーバー起動を邪魔しない)
 client.login(TOKEN);
