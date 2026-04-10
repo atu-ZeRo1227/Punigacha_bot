@@ -31,6 +31,9 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds],
 });
 
+/* ========= 状態管理 ========= */
+let isBotReady = false;
+
 /* ========= 共通（Spreadsheet API経由） ========= */
 let cache = {
   config: {},
@@ -39,29 +42,36 @@ let cache = {
   cooldowns: {}
 };
 
+// axios のデフォルト設定にタイムアウトを追加
+const api = axios.create({ timeout: 10000 });
+
 // GASから全データを取得して同期
 async function syncFromGas() {
-  if (!GAS_URL) return;
+  if (!GAS_URL) {
+    console.warn("⚠️ GACHA_LOG_URL が設定されていないため、GAS同期をスキップします。");
+    return;
+  }
   try {
-    const res = await axios.post(GAS_URL, { action: "get_all", key: API_KEY });
+    console.log("🔄 GASからデータ同期中...");
+    const res = await api.post(GAS_URL, { action: "get_all", key: API_KEY });
     if (res.data) {
       cache.config = res.data.config || {};
       cache.characters = res.data.characters || [];
       cache.ranking = res.data.ranking || {};
       cache.cooldowns = res.data.cooldowns || {};
-      console.log("Synced all data from Spreadsheet");
+      console.log("✅ GASとの同期が完了しました。");
     }
   } catch (err) {
-    console.error("Failed to sync from GAS:", err.message);
+    console.error("❌ GAS同期エラー:", err.message);
   }
 }
 
 async function saveToGas(action, data) {
   if (!GAS_URL) return;
   try {
-    await axios.post(GAS_URL, { action, key: API_KEY, data });
+    await api.post(GAS_URL, { action, key: API_KEY, data });
   } catch (err) {
-    console.error(`Failed to save to GAS (${action}):`, err.message);
+    console.error(`❌ GAS保存エラー (${action}):`, err.message);
   }
 }
 
@@ -157,18 +167,29 @@ function getUserRank(uid) {
 
 /* ========= 起動時 ========= */
 client.once("ready", async () => {
-  await syncFromGas(); // 初回同期
-  const commands = [
-    new SlashCommandBuilder().setName("gacha").setDescription("ガチャパネルを設置").addChannelOption(o => o.setName("channel").setDescription("設置先のチャンネル").addChannelTypes(ChannelType.GuildText).setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder().setName("admin_gacha").setDescription("管理者パネル").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder().setName("rank_user").setDescription("pt操作").addUserOption(o => o.setName("user").setDescription("対象ユーザー").setRequired(true)).addIntegerOption(o => o.setName("point").setDescription("追加・削除するpt").setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder().setName("rank_reset").setDescription("ランキングリセット").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder().setName("gacha_sync").setDescription("スプレッドシートから再読み込み").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder().setName("cooldown_reset").setDescription("全ユーザーのクールタイムをリセット").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-    new SlashCommandBuilder().setName("gacha_cooldown").setDescription("ガチャのクールタイム(分)を設定").addIntegerOption(o => o.setName("minutes").setDescription("分").setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-  ];
-  await client.application.commands.set(commands);
-  console.log(`起動完了: ${client.user.tag}`);
+  console.log(`🤖 Discordにログインしました: ${client.user.tag}`);
+  
+  // スラッシュコマンドの登録を優先
+  try {
+    const commands = [
+      new SlashCommandBuilder().setName("gacha").setDescription("ガチャパネルを設置").addChannelOption(o => o.setName("channel").setDescription("設置先のチャンネル").addChannelTypes(ChannelType.GuildText).setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+      new SlashCommandBuilder().setName("admin_gacha").setDescription("管理者パネル").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+      new SlashCommandBuilder().setName("rank_user").setDescription("pt操作").addUserOption(o => o.setName("user").setDescription("対象ユーザー").setRequired(true)).addIntegerOption(o => o.setName("point").setDescription("追加・削除するpt").setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+      new SlashCommandBuilder().setName("rank_reset").setDescription("ランキングリセット").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+      new SlashCommandBuilder().setName("gacha_sync").setDescription("スプレッドシートから再読み込み").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+      new SlashCommandBuilder().setName("cooldown_reset").setDescription("全ユーザーのクールタイムをリセット").setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+      new SlashCommandBuilder().setName("gacha_cooldown").setDescription("ガチャのクールタイム(分)を設定").addIntegerOption(o => o.setName("minutes").setDescription("分").setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    ];
+    await client.application.commands.set(commands);
+    console.log("✅ スラッシュコマンドの登録が完了しました。");
+  } catch (err) {
+    console.error("❌ コマンド登録エラー:", err.message);
+  }
+
+  isBotReady = true; // ボット準備完了
+  
+  // データ同期はバックグラウンドで続行（起動をブロックさせない）
+  syncFromGas();
 });
 
 /* ========= Interaction ========= */
@@ -367,18 +388,21 @@ async function rankReset() {
 }
 
 /* ========= サーバー起動 & Bot起動 (並行処理) ========= */
-// 1. Renderのスリープ対策：GASの「目覚まし（wakeRender）」を受け止める窓口
 const http = require("http");
 http.createServer((req, res) => {
-  // GASからのアクセスや監視サービスからのアクセスに応答
-  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end("Bot is Active");
+  if (isBotReady) {
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Bot is Active and Ready");
+  } else {
+    // ボットがまだ準備中の場合は 503 を返し、Renderに「まだ起動中」と伝える
+    res.writeHead(503, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Bot is Starting...");
+  }
 
-  // ログに表示（GASからのアクセスを確認しやすくする）
   const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
-  console.log(`[${now}] ⏰ GASからの目覚まし（またはアクセス）を受信しました。`);
+  console.log(`[${now}] ⏰ 外部アクセス受信 (Ready: ${isBotReady})`);
 }).listen(process.env.PORT || 10000, () => {
-  console.log(`🚀 目覚まし受付窓口が起動しました（Port: ${process.env.PORT || 10000}）`);
+  console.log(`🚀 受付窓口が起動しました（Port: ${process.env.PORT || 10000}）`);
 });
 
 // 2. Discord Botの起動
@@ -387,10 +411,12 @@ if (!TOKEN) {
   process.exit(1);
 }
 
+console.log("⏳ Discordにログインを試行中...");
 client.login(TOKEN).catch(err => {
   console.error("❌ Discord Botのログインに失敗しました:");
   console.error(err);
 });
+
 
 // 未処理のエラーでプロセスの停止を防止・ログ記録
 process.on('unhandledRejection', error => {
