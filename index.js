@@ -381,5 +381,21 @@ http.createServer((req, res) => {
   console.log(`🚀 目覚まし受付窓口が起動しました（Port: ${process.env.PORT || 10000}）`);
 });
 
-// 2. Discord Botの起動 (サーバー起動を邪魔しない)
-client.login(TOKEN);
+// 2. Discord Botの起動
+if (!TOKEN) {
+  console.error("❌ エラー: DISCORD_TOKEN が設定されていません。RenderのEnvironment Variablesを確認してください。");
+  process.exit(1);
+}
+
+client.login(TOKEN).catch(err => {
+  console.error("❌ Discord Botのログインに失敗しました:");
+  console.error(err);
+});
+
+// 未処理のエラーでプロセスの停止を防止・ログ記録
+process.on('unhandledRejection', error => {
+  console.error('Unhandled promise rejection:', error);
+});
+process.on('uncaughtException', error => {
+  console.error('Uncaught exception:', error);
+});
