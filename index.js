@@ -28,7 +28,7 @@ const API_KEY = process.env.API_KEY || "my_secret_key"; // Code.gsのAPI_KEYと�
 const http = require("http");
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Bot is running!");
+  res.end("OK");
 }).listen(process.env.PORT || 10000, () => {
   console.log(`ダミーサーバー起動: ポート ${process.env.PORT || 10000} で待機中...`);
 });
