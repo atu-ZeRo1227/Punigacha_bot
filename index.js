@@ -367,13 +367,18 @@ async function rankReset() {
 }
 
 /* ========= サーバー起動 & Bot起動 (並行処理) ========= */
-// 1. Renderのスリープ対策：Botとは独立してHTTPサーバーを立ち上げる
+// 1. Renderのスリープ対策：GASの「目覚まし（wakeRender）」を受け止める窓口
 const http = require("http");
 http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("OK");
+  // GASからのアクセスや監視サービスからのアクセスに応答
+  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end("Bot is Active");
+
+  // ログに表示（GASからのアクセスを確認しやすくする）
+  const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+  console.log(`[${now}] ⏰ GASからの目覚まし（またはアクセス）を受信しました。`);
 }).listen(process.env.PORT || 10000, () => {
-  console.log(`Render維持用HTTPサーバー起動: ポート ${process.env.PORT || 10000} で待機中...`);
+  console.log(`🚀 目覚まし受付窓口が起動しました（Port: ${process.env.PORT || 10000}）`);
 });
 
 // 2. Discord Botの起動 (サーバー起動を邪魔しない)
