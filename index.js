@@ -373,18 +373,38 @@ async function rankReset() {
 }
 
 /* ========= サーバー起動 & Bot起動 (並行処理) ========= */
-// 1. 接続開始を一番最初に行う（ブランチ化して非同期に実行）
-console.log("🎬 Discord Botのログインプロセスを開始します...");
-if (!TOKEN) {
-  console.error("❌ エラー: DISCORD_TOKEN が設定されていません。Renderの管理画面で環境変数を設定してください。");
-} else {
-  client.login(TOKEN)
-    .then(() => console.log("📡 Discord APIへのログインリクエストを終了しました（接続待ち...）"))
-    .catch(err => {
-      console.error("❌ Discordへのログインに失敗しました:");
-      console.dir(err, { depth: null });
-    });
+// 1. 接続開始：成功するまでしつこく再試行する
+async function startBot() {
+  console.log("🎬 Discord Botのログインプロセスを開始します...");
+  if (!TOKEN) {
+    console.error("❌ エラー: DISCORD_TOKEN が設定されていません。環境変数を確認してください。");
+    return;
+  }
+
+  let attempts = 0;
+  const maxAttempts = 100;
+
+  while (attempts < maxAttempts) {
+    try {
+      attempts++;
+      console.log(`📡 ログイン試行中... (${attempts}/${maxAttempts}回目)`);
+      await client.login(TOKEN);
+      // ログイン成功すればこのループを抜ける
+      break;
+    } catch (err) {
+      console.error(`❌ ログイン失敗: ${err.message}`);
+      if (attempts >= maxAttempts) {
+        console.error("💀 制限回数に達したため再試行を中止します。");
+        break;
+      }
+      console.log("⏳ 10秒後に再試行します...");
+      await new Promise(resolve => setTimeout(resolve, 10000));
+    }
+  }
 }
+
+// 実行開始
+startBot();
 
 // 2. Render維持用HTTPサーバー（目覚まし窓口）を起動
 const http = require("http");
