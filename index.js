@@ -22,7 +22,21 @@ const RANK_CHANNEL_ID = "1455005604278964245";
 const PAST_RANK_CHANNEL_ID = "1469382279800295567";
 const COOLDOWN_MIN_DEFAULT = 60;
 const GAS_URL = process.env.GACHA_LOG_URL;
-const API_KEY = process.env.API_KEY || "my_secret_key"; // Code.gsのAPI_KEYと一致させる
+const API_KEY = process.env.API_KEY || "my_secret_key";
+const PORT = process.env.PORT || 10000;
+
+/* ========= Render維持用HTTPサーバー（目覚まし窓口）を起動 ========= */
+const http = require("http");
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+  res.end("Bot is Active");
+  const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+  console.log(`[${now}] ⏰ 目覚まし信号を受信しました。`);
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 HTTPサーバー起動完了。Renderのステータスが「Success」になります (Port: ${PORT})`);
+});
 
 
 
@@ -162,7 +176,7 @@ function getUserRank(uid) {
 }
 
 /* ========= 起動時 ========= */
-client.once("ready", async () => {
+client.once("clientReady", async () => {
   await syncFromGas(); // 初回同期
   const commands = [
     new SlashCommandBuilder().setName("gacha").setDescription("ガチャパネルを設置").addChannelOption(o => o.setName("channel").setDescription("設置先のチャンネル").addChannelTypes(ChannelType.GuildText).setRequired(true)).setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
@@ -186,12 +200,12 @@ client.on("interactionCreate", async (i) => {
       const title = cache.config.gacha_name ? `🎰 ${cache.config.gacha_name}` : "🎰 ガチャパネル";
       const embed = new EmbedBuilder().setTitle(title).setDescription("下のボタンを押して10連ガチャを引こう！").setColor(0x00ae86).setImage(cache.config.gacha_image || null);
       await channel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("gacha10").setLabel("10連ガチャ").setStyle(ButtonStyle.Primary))] });
-      return i.reply({ content: "設置しました。", ephemeral: true });
+      return i.reply({ content: "設置しました。", flags: [64] });
     }
 
     /* --- クールタイム操作 --- */
     if (i.isChatInputCommand() && i.commandName === "gacha_cooldown") {
-      await i.deferReply({ ephemeral: true });
+      await i.deferReply({ flags: [64] });
       const min = i.options.getInteger("minutes");
       cache.config.cooldown_min = min;
       await saveToGas("save_config", { cooldown_min: min });
@@ -199,7 +213,7 @@ client.on("interactionCreate", async (i) => {
     }
 
     if (i.isChatInputCommand() && i.commandName === "cooldown_reset") {
-      await i.deferReply({ ephemeral: true });
+      await i.deferReply({ flags: [64] });
       cache.cooldowns = {};
       await saveToGas("save_cooldown", {});
       return i.editReply("全ユーザーのクールタイムをリセットしました。");
@@ -207,7 +221,7 @@ client.on("interactionCreate", async (i) => {
 
     if (i.isChatInputCommand() && i.commandName === "admin_gacha") {
       return i.reply({
-        content: "⚙ 管理者パネル", ephemeral: true,
+        content: "⚙ 管理者パネル", flags: [64],
         components: [new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId("admin_name").setLabel("名前変更").setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId("admin_list").setLabel("キャラ一覧").setStyle(ButtonStyle.Secondary),
@@ -218,7 +232,7 @@ client.on("interactionCreate", async (i) => {
     }
 
     if (i.isButton() && i.customId === "gacha10") {
-      await i.deferReply({ ephemeral: true });
+      await i.deferReply({ flags: [64] });
       const remain = checkCooldown(i.user.id);
       if (remain > 0) return i.editReply({ content: `⏳ あと ${Math.ceil(remain / 60000)}分です。` });
 
@@ -269,12 +283,12 @@ client.on("interactionCreate", async (i) => {
 
     if (i.isButton() && i.customId === "admin_list") {
       const list = cache.characters.map((c) => `[${c.id}] ${c.rank} ${c.name} (レート: ${c.rate})`).join("\n");
-      return i.reply({ content: `📦 **キャラ一覧**\n\n${list || "未登録"}`, ephemeral: true });
+      return i.reply({ content: `📦 **キャラ一覧**\n\n${list || "未登録"}`, flags: [64] });
     }
 
     // Modal Submit
     if (i.isModalSubmit() && i.customId === "m_name") {
-      await i.deferReply({ ephemeral: true });
+      await i.deferReply({ flags: [64] });
       const newName = i.fields.getTextInputValue("name");
       cache.config.gacha_name = newName;
       await saveToGas("save_config", { gacha_name: newName });
@@ -282,7 +296,7 @@ client.on("interactionCreate", async (i) => {
     }
 
     if (i.isModalSubmit() && i.customId === "m_add") {
-      await i.deferReply({ ephemeral: true });
+      await i.deferReply({ flags: [64] });
       const newChar = { id: i.fields.getTextInputValue("id"), rank: i.fields.getTextInputValue("rank"), name: i.fields.getTextInputValue("name"), image: i.fields.getTextInputValue("image"), rate: Number(i.fields.getTextInputValue("rate")) };
       cache.characters.push(newChar);
       await saveToGas("save_config", { characters: cache.characters });
@@ -291,7 +305,7 @@ client.on("interactionCreate", async (i) => {
     }
 
     if (i.isModalSubmit() && i.customId === "m_remove") {
-      await i.deferReply({ ephemeral: true });
+      await i.deferReply({ flags: [64] });
       const id = i.fields.getTextInputValue("id");
       cache.characters = cache.characters.filter(c => c.id !== id);
       await saveToGas("save_config", { characters: cache.characters });
@@ -300,13 +314,13 @@ client.on("interactionCreate", async (i) => {
     }
 
     if (i.isChatInputCommand() && i.commandName === "gacha_sync") {
-      await i.deferReply({ ephemeral: true });
+      await i.deferReply({ flags: [64] });
       await syncFromGas();
       return i.editReply("同期完了しました。");
     }
 
     if (i.isChatInputCommand() && i.commandName === "rank_user") {
-      await i.deferReply({ ephemeral: true });
+      await i.deferReply({ flags: [64] });
       await addPoint(i.options.getUser("user"), i.options.getInteger("point"));
       return i.editReply("操作完了");
     }
@@ -376,8 +390,8 @@ async function rankReset() {
 // 1. 接続開始：成功するまでしつこく再試行する
 async function startBot() {
   console.log("🎬 Discord Botのログインプロセスを開始します...");
-  if (!TOKEN) {
-    console.error("❌ エラー: DISCORD_TOKEN が設定されていません。環境変数を確認してください。");
+  if (!TOKEN || TOKEN.length < 10) {
+    console.error("❌ エラー: DISCORD_TOKEN が正しく設定されていません。環境変数を確認してください。");
     return;
   }
 
@@ -406,19 +420,7 @@ async function startBot() {
 // 実行開始
 startBot();
 
-// 2. Render維持用HTTPサーバー（目覚まし窓口）を起動
-const http = require("http");
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-  res.end("Bot is Active");
-  const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
-  console.log(`[${now}] ⏰ 目覚まし信号を受信しました。`);
-});
-
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 HTTPサーバー起動完了。Renderのステータスが「Success」になります (Port: ${PORT})`);
-});
+// startBotは後続で呼び出されるため削除
 
 // 未処理のエラーで落ちないように保護
 process.on('unhandledRejection', error => {
