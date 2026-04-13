@@ -27,21 +27,29 @@ const GAS_URL = process.env.GACHA_LOG_URL;
 const API_KEY = process.env.API_KEY || "my_secret_key";
 const PORT = process.env.PORT || 10000;
 
+console.log(`[System] Initializing with PORT: ${PORT}`);
+
 /* ========= 1. Render用HTTPサーバー (独立して動作) ========= */
 const startHttpServer = () => {
   const server = http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("Bot components are running independently.");
     const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
-    console.log(`[${now}] ⏰ HTTP Health Check received.`);
+    
+    // ヘルスチェックへの応答
+    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Bot is Active and Healthy");
+
+    // GASまたはRenderからのリクエストをログに表示（デバッグ用）
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    console.log(`[${now}] ⏰ HTTP Request received from ${ip} (Path: ${req.url})`);
   });
 
   server.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 HTTP Server is listening on Port: ${PORT}`);
+    console.log(`🚀 HTTP Server is now listening on 0.0.0.0:${PORT}`);
+    console.log(`   (Render's "No open ports detected" should be resolved)`);
   });
 
   server.on('error', (err) => {
-    console.error("HTTP Server Error:", err);
+    console.error("❌ HTTP Server Critical Error:", err);
   });
 };
 
@@ -50,8 +58,16 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, // 明示的に指定
+    GatewayIntentBits.MessageContent,
   ],
+});
+
+// エラー監視の追加
+client.on(Events.Error, (err) => console.error("Discord Client Error:", err));
+client.on(Events.ShardDisconnect, (event) => console.warn("Shard Disconnected:", event));
+client.on('debug', (info) => {
+    if (info.includes('Heartbeat') || info.includes('Ready')) return;
+    // 必要に応じて有効化: console.log(`[DEBUG] ${info}`);
 });
 
 /* ========= 共通（Spreadsheet API経由） ========= */
