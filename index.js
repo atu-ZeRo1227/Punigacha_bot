@@ -13,6 +13,7 @@ const {
   EmbedBuilder,
   PermissionFlagsBits,
   ChannelType,
+  MessageFlags,
 } = require("discord.js");
 const axios = require("axios");
 const http = require("http");
@@ -217,6 +218,12 @@ client.once(Events.ClientReady, async () => {
   } catch (err) {
     console.error("スラッシュコマンドの登録に失敗しました:", err);
   }
+
+  // 30秒ごとに状態をログに出す
+  setInterval(() => {
+    const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
+    console.log(`[${now}] 💓 Bot Status: Running (Gateway Ping: ${client.ws.ping}ms)`);
+  }, 30000);
 });
 
 /* ========= Interaction処理 ========= */
@@ -228,11 +235,11 @@ client.on(Events.InteractionCreate, async (i) => {
         const title = cache.config.gacha_name ? `🎰 ${cache.config.gacha_name}` : "🎰 ガチャパネル";
         const embed = new EmbedBuilder().setTitle(title).setDescription("下のボタンを押して10連ガチャを引こう！").setColor(0x00ae86).setImage(cache.config.gacha_image || null);
         await channel.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("gacha10").setLabel("10連ガチャ").setStyle(ButtonStyle.Primary))] });
-        return i.reply({ content: "設置しました。", ephemeral: true });
+        return i.reply({ content: "設置しました。", flags: [MessageFlags.Ephemeral] });
       }
 
       if (i.commandName === "gacha_cooldown") {
-        await i.deferReply({ ephemeral: true });
+        await i.deferReply({ flags: [MessageFlags.Ephemeral] });
         const min = i.options.getInteger("minutes");
         cache.config.cooldown_min = min;
         await saveToGas("save_config", { cooldown_min: min });
@@ -240,7 +247,7 @@ client.on(Events.InteractionCreate, async (i) => {
       }
 
       if (i.commandName === "cooldown_reset") {
-        await i.deferReply({ ephemeral: true });
+        await i.deferReply({ flags: [MessageFlags.Ephemeral] });
         cache.cooldowns = {};
         await saveToGas("save_cooldown", {});
         return i.editReply("全ユーザーのクールタイムをリセットしました。");
@@ -248,7 +255,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
       if (i.commandName === "admin_gacha") {
         return i.reply({
-          content: "⚙ 管理者パネル", ephemeral: true,
+          content: "⚙ 管理者パネル", flags: [MessageFlags.Ephemeral],
           components: [new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId("admin_name").setLabel("名前変更").setStyle(ButtonStyle.Primary),
             new ButtonBuilder().setCustomId("admin_list").setLabel("キャラ一覧").setStyle(ButtonStyle.Secondary),
@@ -259,13 +266,13 @@ client.on(Events.InteractionCreate, async (i) => {
       }
 
       if (i.commandName === "gacha_sync") {
-        await i.deferReply({ ephemeral: true });
+        await i.deferReply({ flags: [MessageFlags.Ephemeral] });
         await syncFromGas();
         return i.editReply("同期完了しました。");
       }
 
       if (i.commandName === "rank_user") {
-        await i.deferReply({ ephemeral: true });
+        await i.deferReply({ flags: [MessageFlags.Ephemeral] });
         await addPoint(i.options.getUser("user"), i.options.getInteger("point"));
         return i.editReply("操作完了");
       }
@@ -279,7 +286,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
     if (i.isButton()) {
       if (i.customId === "gacha10") {
-        await i.deferReply({ ephemeral: true });
+        await i.deferReply({ flags: [MessageFlags.Ephemeral] });
         const remain = checkCooldown(i.user.id);
         if (remain > 0) return i.editReply({ content: `⏳ あと ${Math.ceil(remain / 60000)}分です。` });
 
@@ -329,13 +336,13 @@ client.on(Events.InteractionCreate, async (i) => {
 
       if (i.customId === "admin_list") {
         const list = cache.characters.map((c) => `[${c.id}] ${c.rank} ${c.name} (レート: ${c.rate})`).join("\n");
-        return i.reply({ content: `📦 **キャラ一覧**\n\n${list || "未登録"}`, ephemeral: true });
+        return i.reply({ content: `📦 **キャラ一覧**\n\n${list || "未登録"}`, flags: [MessageFlags.Ephemeral] });
       }
     }
 
     if (i.isModalSubmit()) {
       if (i.customId === "m_name") {
-        await i.deferReply({ ephemeral: true });
+        await i.deferReply({ flags: [MessageFlags.Ephemeral] });
         const newName = i.fields.getTextInputValue("name");
         cache.config.gacha_name = newName;
         await saveToGas("save_config", { gacha_name: newName });
@@ -343,7 +350,7 @@ client.on(Events.InteractionCreate, async (i) => {
       }
 
       if (i.customId === "m_add") {
-        await i.deferReply({ ephemeral: true });
+        await i.deferReply({ flags: [MessageFlags.Ephemeral] });
         const newChar = { id: i.fields.getTextInputValue("id"), rank: i.fields.getTextInputValue("rank"), name: i.fields.getTextInputValue("name"), image: i.fields.getTextInputValue("image"), rate: Number(i.fields.getTextInputValue("rate")) };
         cache.characters.push(newChar);
         await saveToGas("save_config", { characters: cache.characters });
@@ -352,7 +359,7 @@ client.on(Events.InteractionCreate, async (i) => {
       }
 
       if (i.customId === "m_remove") {
-        await i.deferReply({ ephemeral: true });
+        await i.deferReply({ flags: [MessageFlags.Ephemeral] });
         const id = i.fields.getTextInputValue("id");
         cache.characters = cache.characters.filter(c => c.id !== id);
         await saveToGas("save_config", { characters: cache.characters });
