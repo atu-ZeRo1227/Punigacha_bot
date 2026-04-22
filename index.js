@@ -32,25 +32,16 @@ console.log(`[System] Initializing with PORT: ${PORT}`);
 
 /* ========= 1. Render用HTTPサーバー (独立して動作) ========= */
 const startHttpServer = () => {
-  const server = http.createServer((req, res) => {
+  http.createServer((req, res) => {
+    // すべてのリクエストをログに記録
     const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" });
-    
-    // ヘルスチェックへの応答
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("Bot is Active and Healthy");
+    console.log(`[${now}] 📡 HTTP Request Received: ${req.method} ${req.url}`);
 
-    // GASまたはRenderからのリクエストをログに表示（デバッグ用）
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-    console.log(`[${now}] ⏰ HTTP Request received from ${ip} (Path: ${req.url})`);
-  });
-
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 HTTP Server is now listening on 0.0.0.0:${PORT}`);
-    console.log(`   (Render's "No open ports detected" should be resolved)`);
-  });
-
-  server.on('error', (err) => {
-    console.error("❌ HTTP Server Critical Error:", err);
+    // 即座に 200 OK を返却
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("200 OK");
+  }).listen(PORT, "0.0.0.0", () => {
+    console.log(`🚀 HTTP Server is running on port ${PORT} (Legacy Wakeup Support)`);
   });
 };
 
